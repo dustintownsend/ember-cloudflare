@@ -1,4 +1,4 @@
-import { MAX_MESSAGE_LENGTH } from "@ember/protocol";
+import { MAX_MESSAGE_LENGTH, MAX_MESSAGE_HTML_LENGTH } from "@ember/protocol";
 import { createServer, type IncomingMessage } from "node:http";
 import { type Config, parseDelivery, safeFetch } from "./config.ts";
 import { sameSecret } from "./oauth.ts";
@@ -11,13 +11,15 @@ export function escapeHtml(text: string) {
     (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char] ?? char,
   );
 }
+const MAX_WEBHOOK_BYTES = 6 * (MAX_MESSAGE_LENGTH + MAX_MESSAGE_HTML_LENGTH + 10_000);
+
 async function body(req: IncomingMessage): Promise<unknown> {
   let size = 0;
   const chunks: Buffer[] = [];
   for await (const chunk of req) {
     const buffer = Buffer.from(chunk);
     size += buffer.length;
-    if (size > 65536) throw new Error("Payload too large");
+    if (size > MAX_WEBHOOK_BYTES) throw new Error("Payload too large");
     chunks.push(buffer);
   }
   return JSON.parse(Buffer.concat(chunks).toString("utf8"));

@@ -29,7 +29,6 @@ const readSchema = z.object({
     latestRunId: id.nullable(),
     activeRunId: id.nullable(),
     pendingRequestCount: z.number(),
-    settled: z.boolean(),
     runtimeMode: z.string(),
   }),
   recentRuns: z.array(z.object({ runId: id, status })),
@@ -53,10 +52,13 @@ export class T3 {
   constructor(config: Config) {
     this.config = config;
   }
-  private link(value: string | null | undefined) {
+  private link(value: string | null | undefined, threadId: string) {
     if (!value || value.length > 2048) return null;
     try {
-      const url = new URL(value);
+      const href = value.startsWith("<") && value.endsWith(">") ? value.slice(1, -1) : value;
+      const native = `t3-thread://v2/${this.config.environmentId}/${threadId}`;
+      if (href.startsWith("t3-thread:")) return href === native && !/[?#\s<>]/.test(href) ? `<${href}>` : null;
+      const url = new URL(href);
       return url.origin === this.config.t3Origin && !url.username && !url.password ? url.href : null;
     } catch {
       return null;
@@ -109,6 +111,7 @@ export class T3 {
         t3_thread_launch: ["clientRequestId", "runtimeMode", "workspaceStrategy", "projectId"],
         t3_thread_send: ["clientRequestId", "mode"],
         t3_thread_read: ["threadId", "afterPosition"],
+        t3_thread_wait: ["threadId", "runId", "untilDelegatedWorkSettled"],
       })) {
         const tool = tools.find((t) => t.name === name);
         if (!tool || fields.some((f) => !tool.inputSchema.properties || !(f in tool.inputSchema.properties)))
@@ -167,8 +170,7 @@ export class T3 {
     return this.connected(async (client) => {
       if (previous) {
         const read = await this.read(client, previous.threadId);
-        if (read.thread.activeRunId || read.thread.pendingRequestCount || !read.thread.settled)
-          throw new Error("T3 thread busy");
+        if (read.thread.activeRunId || read.thread.pendingRequestCount) throw new Error("T3 thread busy");
       }
       const args = previous
         ? { threadId: previous.threadId, message, mode: "queue", clientRequestId: requestId }
@@ -193,7 +195,7 @@ export class T3 {
           : result.projectId !== this.config.projectId
       )
         throw new Error("Invalid acceptance");
-      return { threadId: result.threadId, runId: result.runId, link: this.link(result.link) };
+      return { threadId: result.threadId, runId: result.runId, link: this.link(result.link, result.threadId) };
     });
   }
   async observe(target: Target): Promise<{ done: boolean; text: string; status: string }> {
@@ -201,18 +203,33 @@ export class T3 {
       let page = await this.read(client, target.threadId);
       const run = page.recentRuns.find((r) => r.runId === target.runId);
       if (!run) throw new Error("Exact run not in recent history");
-      const done =
-        ["completed", "failed", "interrupted", "cancelled", "rolled_back"].includes(run.status) &&
-        page.thread.settled &&
-        !page.thread.activeRunId &&
-        !page.thread.pendingRequestCount;
-      if (!done) return { done: false, text: "", status: run.status };
+      const completion = await this.call(
+        client,
+        "t3_thread_wait",
+        { threadId: target.threadId, runId: target.runId, timeoutMs: 1, untilDelegatedWorkSettled: true },
+        z.object({
+          threadId: id,
+          runId: id.nullable(),
+          status,
+          timedOut: z.boolean(),
+          resultRun: z.object({ runId: id, status }).optional(),
+        }),
+      );
+      if (completion.threadId !== target.threadId) throw new Error("Wait target mismatch");
+      if (completion.timedOut || !completion.resultRun)
+        return { done: false, text: "", status: completion.status };
+      const resultRun = completion.resultRun;
+      if (!["completed", "failed", "interrupted", "cancelled", "rolled_back"].includes(resultRun.status))
+        throw new Error("Nonterminal result run");
+      page = await this.read(client, target.threadId);
+      if (page.thread.activeRunId || page.thread.pendingRequestCount)
+        return { done: false, text: "", status: "running" };
       const output = new Map<string, string>();
       for (let count = 0; ; count++) {
         for (const item of page.items)
           if (
             item.sourceThreadId === target.threadId &&
-            item.runId === target.runId &&
+            item.runId === resultRun.runId &&
             item.createdBy === "agent" &&
             item.visibility === "local" &&
             item.type === "assistant_message" &&
@@ -226,7 +243,7 @@ export class T3 {
         if (page.hasMore && (page.nextPosition === null || page.nextPosition <= next))
           throw new Error("Invalid transcript pagination");
       }
-      return { done: true, text: [...output.values()].join("\n\n").slice(0, 16000), status: run.status };
+      return { done: true, text: [...output.values()].join("\n\n").slice(0, 16000), status: resultRun.status };
     });
   }
 }

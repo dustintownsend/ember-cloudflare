@@ -11,6 +11,7 @@ import { configSchema, parseDelivery } from "./config.ts";
 import { Store } from "./store.ts";
 import { Bridge } from "./bridge.ts";
 import { T3 } from "./t3.ts";
+import { railsJson } from "../../../apps/worker/src/bots/rails-json.ts";
 
 async function listen(server: Server) {
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -193,6 +194,9 @@ test("real MCP HTTP serialization validates environment, modes, queued followups
   const c = config();
   const calls: { name: string; args: Record<string, unknown> }[] = [];
   let environment = "env";
+  let link = "https://evil.example/t";
+  let pendingDelegates = false;
+  let resultRunId = "run";
   const http = createServer(async (req, res) => {
     const mcp = new McpServer({ name: "fixture", version: "1" });
     const result = (data: Record<string, unknown>) => ({
@@ -222,7 +226,7 @@ test("real MCP HTTP serialization validates environment, modes, queued followups
       },
       async (args) => {
         calls.push({ name: "launch", args });
-        return result({ threadId: "t", runId: "run", projectId: "p", link: "https://evil.example/t" });
+        return result({ threadId: "t", runId: "run", projectId: "p", link });
       },
     );
     mcp.registerTool(
@@ -263,7 +267,7 @@ test("real MCP HTTP serialization validates environment, modes, queued followups
             latestRunId: "run",
             activeRunId: null,
             pendingRequestCount: 0,
-            settled: true,
+            settled: false,
             runtimeMode: "approval-required",
           },
           recentRuns: [{ runId: "run", status: "completed" }],
@@ -271,7 +275,7 @@ test("real MCP HTTP serialization validates environment, modes, queued followups
             {
               itemId: "i",
               sourceThreadId: "t",
-              runId: "run",
+              runId: resultRunId,
               createdBy: "agent",
               visibility: "local",
               type: "assistant_message",
@@ -281,7 +285,7 @@ test("real MCP HTTP serialization validates environment, modes, queued followups
             {
               itemId: "bad",
               sourceThreadId: "child",
-              runId: "run",
+              runId: resultRunId,
               createdBy: "agent",
               visibility: "local",
               type: "assistant_message",
@@ -293,6 +297,15 @@ test("real MCP HTTP serialization validates environment, modes, queued followups
           nextPosition: null,
         }),
     );
+    mcp.registerTool("t3_thread_wait", {
+      inputSchema: { environmentId: z.string(), threadId: z.string(), runId: z.string(),
+        timeoutMs: z.number(), untilDelegatedWorkSettled: z.boolean() },
+    }, async (args) => {
+      assert.equal(args.runId, "run");
+      assert.equal(args.untilDelegatedWorkSettled, true);
+      return result({ threadId: "t", runId: "run", status: "completed", timedOut: pendingDelegates,
+        ...(pendingDelegates ? {} : { resultRun: { runId: resultRunId, status: "completed" } }) });
+    });
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
     res.on("close", () => {
       void transport.close();
@@ -310,6 +323,21 @@ test("real MCP HTTP serialization validates environment, modes, queued followups
     assert.equal(calls.find((c) => c.name === "launch")?.args.runtimeMode, "approval-required");
     assert.deepEqual(calls.find((c) => c.name === "launch")?.args.workspaceStrategy, { type: "worktree" });
     assert.equal((await t3.observe(target)).text, "local output");
+    pendingDelegates = true;
+    assert.equal((await t3.observe(target)).done, false);
+    pendingDelegates = false;
+    resultRunId = "delegate-continuation";
+    assert.equal((await t3.observe(target)).text, "local output");
+    for (const native of ["<t3-thread://v2/env/t>", "t3-thread://v2/env/t"]) {
+      link = native;
+      assert.equal((await t3.submit("r:native", "hello")).link, "<t3-thread://v2/env/t>");
+    }
+    for (const invalid of ["<t3-thread://v2/other/t>", "<t3-thread://v2/env/other>", "t3-thread://v2/env/t?x", "t3-thread://v2/env/t/extra"]) {
+      link = invalid;
+      assert.equal((await t3.submit("r:invalid", "hello")).link, null);
+    }
+    link = "https://t3.example/threads/env/t";
+    assert.equal((await t3.submit("r:hosted", "hello")).link, link);
     await t3.submit("r:next", "followup", target);
     assert.equal(calls.find((c) => c.name === "send")?.args.mode, "queue");
     const reservation = createServer();
@@ -488,6 +516,35 @@ test("observation errors remain visible and callback rejection preserves the T3 
   } finally {
     store.close();
     await close(callback);
+    rmSync(c.dataDir, { recursive: true });
+  }
+});
+
+
+test("ingress accepts valid Ember JSON escaping and bounds oversized envelopes", async () => {
+  const c = config();
+  const store = new Store(c);
+  const bridge = new Bridge(c, store, {
+    submit: async () => { throw new Error("No submission during admission"); },
+    observe: async () => { throw new Error("No observation during admission"); },
+  });
+  const server = bridge.server();
+  const base = await listen(server);
+  try {
+    const message = payload();
+    message.message.body = { plain: "&".repeat(5000), html: "<p>" + "&amp;".repeat(5000) + "</p>" };
+    const serialized = railsJson(message);
+    assert(Buffer.byteLength(serialized) > 65536);
+    const post = (body: string) => fetch(`${base}/webhook/${c.webhookSecret}`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body,
+    });
+    assert.equal((await post(serialized)).status, 202);
+    assert.equal(store.jobs().length, 1);
+    assert.equal((await post(JSON.stringify({ ...message, padding: "x".repeat(800000) }))).status, 400);
+    assert.equal(store.jobs().length, 1);
+  } finally {
+    await close(server);
+    store.close();
     rmSync(c.dataDir, { recursive: true });
   }
 });
