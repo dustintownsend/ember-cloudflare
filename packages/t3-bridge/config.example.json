@@ -1,0 +1,16 @@
+{
+  "emberOrigin": "https://chat.example.com",
+  "botKey": "REPLACE-BOTKEY",
+  "webhookSecret": "REPLACE_WITH_RANDOM_BASE64URL_SECRET_AT_LEAST_32_CHARS",
+  "allowedUsers": ["REPLACE_USER_ID"],
+  "allowedRooms": ["REPLACE_ROOM_ID"],
+  "mcpUrl": "https://REPLACE_T3_HOST/mcp",
+  "environmentId": "REPLACE_ENVIRONMENT_ID",
+  "projectId": "REPLACE_PROJECT_ID",
+  "t3Origin": "https://REPLACE_T3_HOST",
+  "runtimeMode": "approval-required",
+  "dataDir": "/absolute/private/ember-t3-data",
+  "host": "127.0.0.1",
+  "port": 8790,
+  "oauthPort": 8791
+}
