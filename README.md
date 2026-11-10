@@ -262,6 +262,7 @@ pnpm seed       # in a second terminal: the made-up Fernwood team sets Ember up 
 
 - [Self-hosting guide](docs/self-hosting.md): deploying, what it costs, custom domains, who can join,
   email, push notifications, files and security.
+- [T3 Code agents](docs/t3-bridge.md): message agents from Ember through a standalone MCP bridge.
 - [Slack-compatible webhooks](docs/slack-webhooks.md): what bots can post, and how it looks.
 - [Development](docs/development.md): the code's layout, running Ember locally, tests and performance.
 - [The database](docs/database.md): Ember's schema beside Campfire's.
